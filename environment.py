@@ -279,7 +279,7 @@ class KoreGymEnv(gym.Env):
         gym_action = np.reshape(gym_action, (self.config.size, self.config.size, 4))
     
 
-        # Broadcast the same action to all shipyards
+
         board = self.board
         me = board.current_player
         cnt = 0
@@ -316,7 +316,7 @@ class KoreGymEnv(gym.Env):
                 )
             )
             action = None
-            # Shipyard defenser, note: now does the same as greedy spawner, should solve the shipyard problem first
+            # Shipyard defenser
             if -1 <= gym_action[point.y][point.x][0] < -0.6:
                 # Limit the number of ships to the maximum that can be actually built
                 max_spawn = shipyard.max_spawn
