@@ -258,7 +258,7 @@ class KoreGymEnv(gym.Env):
         In other words, transform a stable-baselines3 action into an action compatible with the kore environment.
         This method is central - It defines how the agent output is mapped to kore actions.
         You can modify it to suit your needs.
-        Our gym_action is 21*21*(4+MAX_FP_LEN). 
+        Our gym_action is 21*21*4. 
         We will interpret the values as follows:
         x, y: position of the cell(shipyard) in the board
         gym_action[x][y][0] represents the identity of the launched fleet or for shipyards to build ships
@@ -270,14 +270,13 @@ class KoreGymEnv(gym.Env):
         abs(gym_action[x][y][1]) encodes the number of ships to build/launch.
         gym_action[x][y][2] the target to go (x axis)
         gym_action[x][y][3] the target to go (y axis)
-        gym_action[x][y][4:] the flight plan
         Args:
             gym_action: The action produces by our stable-baselines3 agent.
         Returns:
             The corresponding kore environment actions or None if the agent wants to wait.
         """         
-        total_feature = 4 + MAX_FP_LEN  #in order: identity, number of ships, x-axis, y-axis, flight_plan
-        gym_action = np.reshape(gym_action, (self.config.size, self.config.size, total_feature))
+
+        gym_action = np.reshape(gym_action, (self.config.size, self.config.size, 4))
     
 
         # Broadcast the same action to all shipyards
