@@ -3,14 +3,15 @@ import numpy as np
 from gym import spaces
 from math import floor
 from kaggle_environments import make
-from kaggle_environments.envs.kore_fleets.helpers import ShipyardAction, Board, Direction
+from kaggle_environments.envs.kore_fleets.helpers import ShipyardAction, Board, Direction, Fleet
+# from helpers import ShipyardAction, Board, Direction, Fleet
 from typing import Union, Tuple, Dict
 from reward_utils import get_board_value
 from config import *
 
 class FlightPlan:
     # possible tokens in flight plan:
-    #   0~9: #duplicates for the following token
+    #   0~9: keeps current direction for n steps
     #   N, E, S, W: directions
     #   C: convert to shipyard
 
@@ -23,38 +24,29 @@ class FlightPlan:
             assert isinstance(num, int)
             
             return (
-                "N" if num == 1 else
-                "E" if num == 2 else
-                "S" if num == 3 else
-                "W" if num == 4 else
-                "C" if num == 5 else
+                "N" if num == 0 else
+                "E" if num == 1 else
+                "S" if num == 2 else
+                "W" if num == 3 else
+                "C" if num == 4 else
                 ""
             )
 
         plan_in_str = ""
         for i, num in enumerate(plan_in_arr):
-            # int in [0, 5] 
-            # 0 indicates end of flight plan
-            # the rest correspond to N, E, S, W, C
-            
-            # plan must start with "NESW"
             if i == 0: 
-                low_out = 1
-                high_out = 4 + .99 # to ensure equal likelyhood
+                # a new plan must start with "NESW"
+                low_out = 0
+                high_out = 3 + .99 # add .99 to ensure equal likelyhood
             else:
                 low_out = 0
-                high_out = 5 + .99
+                high_out = 4 + .99
 
             num = int(np.clip(num, 0, 1) * (high_out - low_out) + low_out) 
-
-            token = num_to_token(num)
-            if not token:
-                break
-
-            plan_in_str += token
+            plan_in_str += num_to_token(num)
 
         # flight plan here is not truncated
-        # e.g. 3E is represented as EEE
+        # e.g. E3 is represented as EEEE
         return self._truncate_flight_plan(plan_in_str)
 
     @staticmethod
@@ -64,30 +56,25 @@ class FlightPlan:
         if len(flight_plan) <= 1:
             return flight_plan
 
-        # flight plan must start with NESW
-        # do not truncate the 1st token
-        fp = flight_plan[0]
-        flight_plan = flight_plan[1:]
-
+        fp = ""
         prev_token = flight_plan[0]
-        duplicate_cnt = 1
-        for token in flight_plan[1:]:
-            if token != prev_token:
-                if duplicate_cnt > 1:
-                    fp += str(duplicate_cnt)
-                
+        cnt = 0
+
+        for token in flight_plan:
+            if token != prev_token or token == "C":
                 fp += prev_token
-                duplicate_cnt = 1
+                if cnt > 1:
+                    fp += str(cnt-1)
+                cnt = 1
             else:
-                duplicate_cnt += 1
+                cnt += 1
 
             prev_token = token
 
-        if duplicate_cnt > 1:
-            fp += str(duplicate_cnt)
-        
         fp += prev_token
-
+        if cnt > 1:
+            fp += str(cnt-1)
+        
         return fp
 
     # convert plan from kore format (string)
@@ -117,10 +104,10 @@ class FlightPlan:
         return plan_in_array
 
     @staticmethod
-    def _expand_flight_plan(flight_plan: str) -> Tuple:
+    def _expand_flight_plan(flight_plan: str) -> str:
         assert isinstance(flight_plan, str)
 
-        # 3W2E -> WWWEE
+        # 3W2E -> 000WWE
 
         fp = ""        
         while flight_plan:
@@ -128,10 +115,16 @@ class FlightPlan:
             while i < len(flight_plan) and flight_plan[i].isnumeric():
                 i += 1
 
-            if i == 0:
+            if i == len(flight_plan):
+                # plan ends with a number
+                # but trailing number has no effect
+                break
+            elif i == 0:
+                # plan starts with NESWC
                 fp += flight_plan[i]
             else:
-                fp += int(flight_plan[:i]) * flight_plan[i]
+                # plan starts with a number
+                fp += int(flight_plan[:i]) * "0" + flight_plan[i]
 
             flight_plan = flight_plan[i+1:]
         
@@ -318,11 +311,15 @@ class KoreGymEnv(gym.Env):
                 number_of_ships = min(number_of_ships, shipyard_count)
                 if number_of_ships:
                     plan_in_arr = gym_action[point.y][point.x][1:]
+                    flight_plan = FlightPlan().arr_to_str(plan_in_arr)
+
+                    max_len = Fleet.max_flight_plan_len_for_ship_count(number_of_ships)
+                    if len(flight_plan) > max_len:
+                        flight_plan = flight_plan[:max_len]
                     
                     action = ShipyardAction.launch_fleet_with_flight_plan(
                         number_ships=number_of_ships,
-                        # flight_plan=self._flight_plan_arr_to_str(plan_in_arr),
-                        flight_plan=FlightPlan().arr_to_str(plan_in_arr),
+                        flight_plan=flight_plan,
                     )
 
             shipyard.next_action = action
