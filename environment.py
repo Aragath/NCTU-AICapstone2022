@@ -371,7 +371,7 @@ class KoreGymEnv(gym.Env):
                     else:
                         action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, 
                                                                               flight_plan=flight_plan)
-                    # print("Build ", target_pos[point.y][point.x][0], target_pos[point.y][point.x][1], " with ", number_of_ships)
+                    # print("Build ", target_pos[0], target_pos[1], " with ", number_of_ships)
                     # print(flight_plan)
                     # print("***********************It should be LAUNCH!")
             # Greedy Spawner
