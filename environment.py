@@ -382,8 +382,8 @@ class KoreGymEnv(gym.Env):
                 number_of_ships = min(number_of_ships, max_spawn, max_purchasable)
                 if number_of_ships:
                     action = ShipyardAction.spawn_ships(number_ships=number_of_ships)
-                # print("Spawn ", number_of_ships)
-                # print("***********************It should be SPAWN!")
+                    # print("Spawn ", number_of_ships)
+                    # print("***********************It should be SPAWN!")
             # Miner
             elif 0.6 <= gym_action[point.y][point.x][0] <= 1:
                 # Get number of ships to launch
