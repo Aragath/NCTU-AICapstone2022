@@ -10,9 +10,9 @@ from kaggle_environments.envs.kore_fleets.helpers import ShipyardAction, Board, 
 from typing import Union, Tuple, Dict
 from reward_utils1 import get_board_value
 #import basics
-from helper1 import *
+from helper import *
 #from basics import capture_shipyard
-from config2 import *
+from config import *
 
 class FlightPlan:                                   #updated version by yung-yu
     # possible tokens in flight plan:
