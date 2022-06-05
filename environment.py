@@ -8,7 +8,7 @@ from math import floor
 from kaggle_environments import make
 from kaggle_environments.envs.kore_fleets.helpers import ShipyardAction, Board, Direction
 from typing import Union, Tuple, Dict
-from reward_utils1 import get_board_value
+from reward_utils import get_board_value
 #import basics
 from helper import *
 #from basics import capture_shipyard
