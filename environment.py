@@ -341,13 +341,8 @@ class KoreGymEnv(gym.Env):
             feat 2. max spawn
 
         Fleet:
-            feat 3. #ships (*= -1 if the fleet belongs to enemy)
-            feat 4. current direction
-            
-        #################### 3D features ####################
-        ### 21x21x5 (size x size x MAX_OBSERVABLE_FP_LEN) ###
-        Fleet:
-            feat 5. flight plan
+            feat 3. #ships of mine
+            feat 4. #ships of the opponent
 
         #################### 1D features ####################
         ################### N_1D_FEATURES ###################
@@ -358,7 +353,7 @@ class KoreGymEnv(gym.Env):
 
         """
 
-        state_2D = np.zeros(shape=(self.config.size, self.config.size, N_2D_FEATURES + MAX_FP_LEN))
+        state_2D = np.zeros(shape=(self.config.size, self.config.size, N_2D_FEATURES))
         board = self.board
         my_id = board.current_player_id
 
@@ -380,19 +375,27 @@ class KoreGymEnv(gym.Env):
 
             fleet = cell.fleet
             if fleet:
-                # feat 3: #ships (fleet)
-                state_2D[point.y, point.x, 3] = (
-                    fleet.ship_count
-                    if fleet.player_id == my_id
-                    else -fleet.ship_count
-                )
-                
-                # feat 4: current direction (fleet)
-                state_2D[point.y, point.x, 4] = fleet.direction.value
+                # feat 3. #ships of mine
+                if fleet.player_id == my_id:
+                    state_2D[point.y, point.x, 3] = fleet.ship_count
+                # feat 4. #ships of the opponent
+                else: 
+                    state_2D[point.y, point.x, 4] = fleet.ship_count
 
-                # feat 5: flight plan (fleet)
-                # state_2D[point.y, point.x, N_2D_FEATURES:] = self._flight_plan_str_to_arr(fleet.flight_plan)
-                state_2D[point.y, point.x, N_2D_FEATURES:] = FlightPlan().str_to_arr(fleet.flight_plan)
+        # express flight plan as the future positions of fleets
+        next_board = self.board.next()
+        for i in range(10):
+            for point, cell in next_board.cells.items():
+                fleet = cell.fleet
+                if fleet:
+                    # feat 3. #ships of mine
+                    if fleet.player_id == my_id:
+                        state_2D[point.y, point.x, 3] += fleet.ship_count * 0.9**(i+1)
+                    # feat 4. #ships of the opponent
+                    else: 
+                        state_2D[point.y, point.x, 4] += fleet.ship_count * 0.9**(i+1)
+                
+            next_board = next_board.next()
 
         # For better performance, bound all features in the range [-1, 1]
         # and as close to a normal distribution as possible
@@ -418,25 +421,18 @@ class KoreGymEnv(gym.Env):
             high_in=MAX_SPAWN_LIMIT,
         )
 
-        # feat 3: Ships in range [-MAX_OBSERVABLE_SHIPS, MAX_OBSERVABLE_SHIPS]
+        # feat 3: #ships of mine [0, MAX_OBSERVABLE_SHIPS]
         state_2D[:, :, 3] = clip_normalize(
             x=state_2D[:, :, 3],
-            low_in=-MAX_OBSERVABLE_SHIPS,
-            high_in=MAX_OBSERVABLE_SHIPS,
+            low_in=0,
+            high_in=MAX_OBSERVABLE_SHIPS*2,
         )
 
-        # feat 4: Fleet direction in range [1, 4]
+        # feat 4: #ships of the opponent [0, MAX_OBSERVABLE_SHIPS]
         state_2D[:, :, 4] = clip_normalize(
             x=state_2D[:, :, 4],
-            low_in=1,
-            high_in=4
-        )
-
-        # feat 5: flight plan token in range [0, 5]
-        state_2D[:, :, N_2D_FEATURES:] = clip_normalize(
-            x=state_2D[:, :, N_2D_FEATURES:],
             low_in=0,
-            high_in=5
+            high_in=MAX_OBSERVABLE_SHIPS*2,
         )
 
         # Flatten the input (recommended by stable_baselines3.common.env_checker.check_env)
