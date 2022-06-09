@@ -4,12 +4,13 @@ from gym import spaces
 from math import floor
 from kaggle_environments import make
 from kaggle_environments.envs.kore_fleets.helpers import ShipyardAction, Board, Direction, Fleet
+from kaggle_environments.helpers import Point
 # from helpers import ShipyardAction, Board, Direction, Fleet
 from typing import Union, Tuple, Dict
 from reward_utils import get_board_value
 from config import *
 
-class FlightPlan:
+class FlightPlanHelper:
     # possible tokens in flight plan:
     #   0~9: keeps current direction for n steps
     #   N, E, S, W: directions
@@ -17,118 +18,93 @@ class FlightPlan:
 
     # convert plan from gym format (array)
     # to that of kore (string)
-    def arr_to_str(self, plan_in_arr: list) -> str:
-        assert isinstance(plan_in_arr, np.ndarray)
 
-        def num_to_token(num) -> str:
-            assert isinstance(num, int)
-            
-            return (
-                "N" if num == 0 else
-                "E" if num == 1 else
-                "S" if num == 2 else
-                "W" if num == 3 else
-                "C" if num == 4 else
-                ""
-            )
+    BOARD_SIZE = 21 # GAME_CONFIG["size"]
 
-        plan_in_str = ""
-        for i, num in enumerate(plan_in_arr):
-            if i == 0: 
-                # a new plan must start with "NESW"
-                low_out = 0
-                high_out = 3 + .99 # add .99 to ensure equal likelyhood
+    def get_shortest_fp(self, src: tuple, dst: tuple, max_len: int, create_shipyard: bool=False) -> str:
+        # generate plan with shortest path to go from src to dst
+        # fleet going out of the board comes back from the other end
+        dx = dst[0] - src[0]
+        if dx < 0: # dst at west
+            dx = abs(dx)
+            if dx < self.BOARD_SIZE / 2:
+                # go west
+                dx = -dx
             else:
-                low_out = 0
-                high_out = 4 + .99
-
-            num = int(np.clip(num, 0, 1) * (high_out - low_out) + low_out) 
-            plan_in_str += num_to_token(num)
-
-        # flight plan here is not truncated
-        # e.g. E3 is represented as EEEE
-        return self._truncate_flight_plan(plan_in_str)
-
-    @staticmethod
-    def _truncate_flight_plan(flight_plan: str) -> str:
-        assert isinstance(flight_plan, str)
-
-        if len(flight_plan) <= 1:
-            return flight_plan
-
-        fp = ""
-        prev_token = flight_plan[0]
-        cnt = 0
-
-        for token in flight_plan:
-            if token != prev_token or token == "C":
-                fp += prev_token
-                if cnt > 1:
-                    fp += str(cnt-1)
-                cnt = 1
+                # go east
+                dx = self.BOARD_SIZE - dx
+        else: # dst at east
+            dx = abs(dx)
+            if dx < self.BOARD_SIZE / 2:
+                # go east
+                dx = dx
             else:
-                cnt += 1
+                # go west
+                dx = -(self.BOARD_SIZE - dx)
 
-            prev_token = token
-
-        fp += prev_token
-        if cnt > 1:
-            fp += str(cnt-1)
+        dy = dst[1] - src[1]
+        if dy < 0: # dst at south
+            dy = abs(dy)
+            if dy < self.BOARD_SIZE / 2:
+                # go south
+                dy = -dy
+            else:
+                # go north
+                dy = self.BOARD_SIZE - dy
+        else: # dst at east
+            dy = abs(dy)
+            if dy < self.BOARD_SIZE / 2:
+                # go north
+                dy = dy
+            else:
+                # go south
+                dy = -(self.BOARD_SIZE - dy)
         
+        if dx > 0:
+            fp_x = "E"
+        elif dx < 0:
+            fp_x = "W"
+        else:
+            fp_x = ""
+        if abs(dx) >= 2:
+            fp_x += str(abs(dx) - 1)
+
+        if dy > 0:
+            fp_y = "N"
+        elif dy < 0:
+            fp_y = "S"
+        else:
+            fp_y = ""
+        if abs(dy) >= 2:
+            fp_y += str(abs(dy) - 1)
+
+        # take the axis with longer distance
+        # to reduce affect of plan truncate
+        if abs(dx) > abs(dy):
+            fp = fp_x + fp_y
+        else:
+            fp = fp_y + fp_x
+
+        if fp and create_shipyard:
+            fp += "C"
+        
+        fp = self._truncate(fp, max_len)
+        assert (not fp) or (fp[0] in "NESW")
         return fp
 
-    # convert plan from kore format (string)
-    # to that of gym (array)
-    def str_to_arr(self, plan_in_str: str) -> list:
-        def token_to_num(token: str) -> int:
-            assert isinstance(token, str)
-
-            return (
-                1 if token == "N" else
-                2 if token == "E" else
-                3 if token == "S" else
-                4 if token == "W" else
-                5 if token == "C" else
-                0
-            )
-
-        expanded_fp = self._expand_flight_plan(plan_in_str)
-        plan_in_array = np.zeros(MAX_FP_LEN)
-
-        for i, token in enumerate(expanded_fp):
-            if i >= MAX_FP_LEN:
-                break
-            
-            plan_in_array[i] = token_to_num(token)
-
-        return plan_in_array
+    @staticmethod
+    def _truncate(plan: str, max_len: int):
+        if not plan or len(plan) <= max_len:
+            return plan
+        elif plan[-1] == "C":
+            return plan[:max_len-1] + "C"
+        else:
+            return plan[:max_len]
 
     @staticmethod
-    def _expand_flight_plan(flight_plan: str) -> str:
-        assert isinstance(flight_plan, str)
-
-        # 3W2E -> 000WWE
-
-        fp = ""        
-        while flight_plan:
-            i = 0
-            while i < len(flight_plan) and flight_plan[i].isnumeric():
-                i += 1
-
-            if i == len(flight_plan):
-                # plan ends with a number
-                # but trailing number has no effect
-                break
-            elif i == 0:
-                # plan starts with NESWC
-                fp += flight_plan[i]
-            else:
-                # plan starts with a number
-                fp += int(flight_plan[:i]) * "0" + flight_plan[i]
-
-            flight_plan = flight_plan[i+1:]
-        
-        return fp
+    def min_ship_cnt_for_fp(fp_len) -> int:
+        # math.floor(2 * math.log(ship_count)) + 1
+        return np.exp(np.ceil(fp_len-1) / 2)
 
 
 class KoreGymEnv(gym.Env):
@@ -180,7 +156,7 @@ class KoreGymEnv(gym.Env):
             dtype=DTYPE
         )
 
-        # ob_space_size = self.config.size ** 2 * (N_2D_FEATURES + MAX_FP_LEN) + N_1D_FEATURES
+        # ob_space_size = self.config.size ** 2 * N_2D_FEATURES + N_1D_FEATURES
         self.observation_space = spaces.Box(
             low=-1,
             high=1,
@@ -256,18 +232,27 @@ class KoreGymEnv(gym.Env):
         return Board(self.previous_obs, self.config)
 
     def gym_to_kore_action(self, gym_action: np.ndarray) -> Dict[str, str]:
-        gym_action = np.reshape(gym_action, (self.config.size, self.config.size, 1+MAX_FP_LEN))
+        gym_action = np.reshape(gym_action, (self.config.size, self.config.size, ACTION_LEN))
 
         """
 
-        gym_action is 21 * 21 * (1 + MAX_FP_LEN)
-            if gym_action[y][x][0] > 0 
-                launch a fleet of abs(gym_action[y][x][0]) ships
-                with flight plan = gym_action[y][x][1:]
-            elif < 0 
-                spawn abs(gym_action[y][x][0]) ships
-            else 
-                wait
+        gym_action is board_size * board_size * ACTION_LEN
+        for a cell located at (x, y), 
+        gym_action[x][y] instructs the agent what to do for an ally shipyard lying here (if there is)
+        (Action)
+
+            Action[0] either specifies the mission of the launched fleet 
+                      or ask the yard to build ships
+
+            - -1 ~ -0.6: do nothing
+            - -0.6 ~ -0.2: build ships
+            - -0.2 ~ 0.2: shipyard builder (fleet)
+            - 0.2 ~ 0.6: miner (fleet)
+            - 0.6 ~ 1: attacker (fleet)
+
+            abs(gym_action[1]): #number of ships to build/launch.
+            gym_action[2]: the target to go (x axis)
+            gym_action[3]: the target to go (y axis)
 
         Args:
             gym_action: The action produces by our stable-baselines3 agent.
@@ -285,11 +270,20 @@ class KoreGymEnv(gym.Env):
             
             if not shipyard or shipyard.player_id != me.id: 
                 continue
+
+            dst_x = gym_action[point.x][point.y][2] # in (-1, 1)
+            dst_y = gym_action[point.x][point.y][3] # in (-1, 1)
+
+            dst_x = int((dst_x + 1) * 10.49) # interger in [0, 20]
+            dst_y = int((dst_y + 1) * 10.49) # interger in [0, 20]
+
+            dst = (dst_x, dst_y)
+            src = (shipyard.position.x, shipyard.position.y)
             
             number_of_ships = int(
                 clip_normalize(
-                    x=abs(gym_action[point.y][point.x][0]),
-                    low_in=0,
+                    x=abs(gym_action[point.x][point.y][1]),
+                    low_in=-1,
                     high_in=1,
                     low_out=1,
                     high_out=MAX_ACTION_FLEET_SIZE
@@ -297,30 +291,50 @@ class KoreGymEnv(gym.Env):
             )
 
             action = None
-            if gym_action[point.y][point.x][0] < 0: # spawn
-                # Limit the number of ships to the maximum that can be actually built
+            mission = gym_action[point.x][point.y][0]
+            if mission < -0.6: # do nothing
+                pass
+
+            elif mission >= -0.6 and mission < -0.2: # build ships
+                # Limit the number of ships to the amount that is actually present in the shipyard
                 max_spawn = shipyard.max_spawn
                 max_purchasable = floor(me.kore / self.config["spawnCost"])
                 number_of_ships = min(number_of_ships, max_spawn, max_purchasable)
+
                 if number_of_ships:
                     action = ShipyardAction.spawn_ships(number_ships=number_of_ships)
 
-            elif gym_action[point.y][point.x][0] > 0: # launch
-                # Limit the number of ships to the amount that is actually present in the shipyard
-                shipyard_count = shipyard.ship_count
-                number_of_ships = min(number_of_ships, shipyard_count)
-                if number_of_ships:
-                    plan_in_arr = gym_action[point.y][point.x][1:]
-                    flight_plan = FlightPlan().arr_to_str(plan_in_arr)
-
+            elif mission >= -0.2 and mission < 0.2: # shipyard builder
+                ship_cnt = shipyard.ship_count
+                number_of_ships = min(number_of_ships, ship_cnt)
+                
+                if number_of_ships >= 50: # the cost of building shipyard
                     max_len = Fleet.max_flight_plan_len_for_ship_count(number_of_ships)
-                    if len(flight_plan) > max_len:
-                        flight_plan = flight_plan[:max_len]
+                    flight_plan = FlightPlanHelper().get_shortest_fp(src=src, dst=dst, max_len=max_len, create_shipyard=True)
+
+                    if flight_plan:
+                        action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, flight_plan=flight_plan)
+
+            elif mission >= 0.2 and mission < 0.6: # miner
+                ship_cnt = shipyard.ship_count
+                number_of_ships = min(number_of_ships, ship_cnt)
+
+                flight_plan = FlightPlanHelper().get_shortest_fp(src=src, dst=dst, max_len=1e10) + FlightPlanHelper().get_shortest_fp(src=dst, dst=src, max_len=1e10)
+                min_ship = FlightPlanHelper().min_ship_cnt_for_fp(len(flight_plan))
+
+                if flight_plan and number_of_ships >= min_ship:
+                    action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, flight_plan=flight_plan)
+
+            else: # attacker
+                ship_cnt = shipyard.ship_count
+                number_of_ships = min(number_of_ships, ship_cnt)
+                
+                if number_of_ships:
+                    max_len = Fleet.max_flight_plan_len_for_ship_count(number_of_ships)
+                    flight_plan = FlightPlanHelper().get_shortest_fp(src=src, dst=dst, max_len=max_len)
                     
-                    action = ShipyardAction.launch_fleet_with_flight_plan(
-                        number_ships=number_of_ships,
-                        flight_plan=flight_plan,
-                    )
+                    if flight_plan:
+                        action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, flight_plan=flight_plan)
 
             shipyard.next_action = action
 
@@ -382,7 +396,7 @@ class KoreGymEnv(gym.Env):
                 else: 
                     state_2D[point.y, point.x, 4] = fleet.ship_count
 
-        # express flight plan as the future positions of fleets
+        # express flight plan as future boards
         next_board = self.board.next()
         for i in range(10):
             for point, cell in next_board.cells.items():
