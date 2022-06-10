@@ -1,29 +1,111 @@
 import gym
 import numpy as np
 from gym import spaces
-import math
-import random
-from typing import List
 from math import floor
 from kaggle_environments import make
-from kaggle_environments.envs.kore_fleets.helpers import ShipyardAction, Board, Direction
+from kaggle_environments.envs.kore_fleets.helpers import ShipyardAction, Board, Direction, Fleet
+from kaggle_environments.helpers import Point
+# from helpers import ShipyardAction, Board, Direction, Fleet
 from typing import Union, Tuple, Dict
 from reward_utils import get_board_value
-#import basics
-from helper import *
-#from basics import capture_shipyard
-from config import (
-    N_FEATURES,
-    ACTION_SIZE,
-    GAME_AGENTS,
-    GAME_CONFIG,
-    DTYPE,
-    MAX_OBSERVABLE_KORE,
-    MAX_OBSERVABLE_SHIPS,
-    MAX_ACTION_FLEET_SIZE,
-    MAX_KORE_IN_RESERVE,
-    WIN_REWARD,
-)
+from config import *
+
+class FlightPlanHelper:
+    # possible tokens in flight plan:
+    #   0~9: keeps current direction for n steps
+    #   N, E, S, W: directions
+    #   C: convert to shipyard
+
+    # convert plan from gym format (array)
+    # to that of kore (string)
+
+    BOARD_SIZE = 21 # GAME_CONFIG["size"]
+
+    def get_shortest_fp(self, src: tuple, dst: tuple, max_len: int, create_shipyard: bool=False) -> str:
+        # generate plan with shortest path to go from src to dst
+        # fleet going out of the board comes back from the other end
+        dx = dst[0] - src[0]
+        if dx < 0: # dst at west
+            dx = abs(dx)
+            if dx < self.BOARD_SIZE / 2:
+                # go west
+                dx = -dx
+            else:
+                # go east
+                dx = self.BOARD_SIZE - dx
+        else: # dst at east
+            dx = abs(dx)
+            if dx < self.BOARD_SIZE / 2:
+                # go east
+                dx = dx
+            else:
+                # go west
+                dx = -(self.BOARD_SIZE - dx)
+
+        dy = dst[1] - src[1]
+        if dy < 0: # dst at south
+            dy = abs(dy)
+            if dy < self.BOARD_SIZE / 2:
+                # go south
+                dy = -dy
+            else:
+                # go north
+                dy = self.BOARD_SIZE - dy
+        else: # dst at east
+            dy = abs(dy)
+            if dy < self.BOARD_SIZE / 2:
+                # go north
+                dy = dy
+            else:
+                # go south
+                dy = -(self.BOARD_SIZE - dy)
+        
+        if dx > 0:
+            fp_x = "E"
+        elif dx < 0:
+            fp_x = "W"
+        else:
+            fp_x = ""
+        if abs(dx) >= 2:
+            fp_x += str(abs(dx) - 1)
+
+        if dy > 0:
+            fp_y = "N"
+        elif dy < 0:
+            fp_y = "S"
+        else:
+            fp_y = ""
+        if abs(dy) >= 2:
+            fp_y += str(abs(dy) - 1)
+
+        # take the axis with longer distance
+        # to reduce affect of plan truncate
+        if abs(dx) > abs(dy):
+            fp = fp_x + fp_y
+        else:
+            fp = fp_y + fp_x
+
+        if fp and create_shipyard:
+            fp += "C"
+        
+        fp = self._truncate(fp, max_len)
+        assert (not fp) or (fp[0] in "NESW")
+        return fp
+
+    @staticmethod
+    def _truncate(plan: str, max_len: int):
+        if not plan or len(plan) <= max_len:
+            return plan
+        elif plan[-1] == "C":
+            return plan[:max_len-1] + "C"
+        else:
+            return plan[:max_len]
+
+    @staticmethod
+    def min_ship_cnt_for_fp(fp_len) -> int:
+        # math.floor(2 * math.log(ship_count)) + 1
+        return np.exp(np.ceil(fp_len-1) / 2)
+
 
 class KoreGymEnv(gym.Env):
     """An openAI-gym env wrapper for kaggle's kore environment. Can be used with stable-baselines3.
@@ -74,14 +156,15 @@ class KoreGymEnv(gym.Env):
             dtype=DTYPE
         )
 
+        # ob_space_size = self.config.size ** 2 * N_2D_FEATURES + N_1D_FEATURES
         self.observation_space = spaces.Box(
             low=-1,
             high=1,
-            shape=(self.config.size ** 2 * N_FEATURES + 3,),
+            shape=OBSERVATION_SIZE,
             dtype=DTYPE
         )
 
-        self.strict_reward = config.get('strict', False)    # is it strict or not, used when evaluating trained agent
+        self.strict_reward = config.get('strict', False)
 
         # Debugging info - Enable or disable as needed
         self.reward = 0
@@ -92,7 +175,7 @@ class KoreGymEnv(gym.Env):
         self.last_done = False
 
     def reset(self) -> np.ndarray:
-        """Resets the trainer and returns the initial observation in state space. Used when training & evaluting
+        """Resets the trainer and returns the initial observation in state space.
 
         Returns:
             self.obs_as_gym_state: the current observation encoded as a state in state space
@@ -147,30 +230,29 @@ class KoreGymEnv(gym.Env):
     @property
     def previous_board(self):
         return Board(self.previous_obs, self.config)
-    
 
     def gym_to_kore_action(self, gym_action: np.ndarray) -> Dict[str, str]:
-        """Decode an action in action space as a kore action.
+        gym_action = np.reshape(gym_action, (self.config.size, self.config.size, ACTION_LEN))
 
-        In other words, transform a stable-baselines3 action into an action compatible with the kore environment.
+        """
 
-        This method is central - It defines how the agent output is mapped to kore actions.
-        You can modify it to suit your needs.
+        gym_action is board_size * board_size * ACTION_LEN
+        for a cell located at (x, y), 
+        gym_action[x][y] instructs the agent what to do for an ally shipyard lying here (if there is)
+        (Action)
 
-        Our gym_action is a 1-dimensional vector of size 2 (as defined in self.action_space). 
-        We will interpret the values as follows:
-        gym_action[0] represents the identity of the launched fleet or for shipyards to build ships
-        gym_action[0]:
-        - -1 ~ -0.6: shipyard defender
-        - -0.6 ~ -0.2: attacker(include fleets / shipyards)
-        - -0.2 ~ 0.2: shipyard builder
-        - 0.2 ~ 0.6: greedy spawner
-        - 0.6 ~ 1: miner
-        abs(gym_action[1]) encodes the number of ships to build/launch.
-        gym_action[2] the target to go (x axis)
-        gym_action[3] the target to go (y axis)
+            Action[0] either specifies the mission of the launched fleet 
+                      or ask the yard to build ships
 
-        Notes: The same action is sent to all shipyards, though we make sure that the actions are valid.
+            - -1 ~ -0.6: do nothing
+            - -0.6 ~ -0.2: build ships
+            - -0.2 ~ 0.2: shipyard builder (fleet)
+            - 0.2 ~ 0.6: miner (fleet)
+            - 0.6 ~ 1: attacker (fleet)
+
+            abs(gym_action[1]): #number of ships to build/launch.
+            gym_action[2]: the target to go (x axis)
+            gym_action[3]: the target to go (y axis)
 
         Args:
             gym_action: The action produces by our stable-baselines3 agent.
@@ -178,228 +260,199 @@ class KoreGymEnv(gym.Env):
         Returns:
             The corresponding kore environment actions or None if the agent wants to wait.
 
-        """         
-        action_launch = gym_action[0] > 0
-        action_build = gym_action[0] < 0
-        # Mapping the number of ships is an interesting exercise. Here we chose a linear mapping to the interval
-        # [1, MAX_ACTION_FLEET_SIZE], but you could use something else. With a linear mapping, all values are
-        # evenly spaced. An exponential mapping, however, would space out lower values, making them easier for the agent
-        # to distinguish and choose, at the cost of needing more precision to accurately select higher values.
-        number_of_ships = int(
-            clip_normalize(
-                x=abs(gym_action[1]),
-                low_in=0,
-                high_in=1,
-                low_out=1,
-                high_out=MAX_ACTION_FLEET_SIZE
-            )
-        )
-        gym_action[2] = int(
-            clip_normalize(
-                x=gym_action[2],
-                low_in=-1,
-                high_in=1,
-                low_out=0,
-                high_out=GAME_CONFIG['size']-1
-            )
-        )
-        gym_action[3] = int(
-            clip_normalize(
-                x=gym_action[3],
-                low_in=-1,
-                high_in=1,
-                low_out=0,
-                high_out=GAME_CONFIG['size']-1
-            )
-        )
-
-        # Broadcast the same action to all shipyards
+        """
+        
         board = self.board
         me = board.current_player
-        for shipyard in me.shipyards:
+
+        for point, cell in board.cells.items():
+            shipyard = cell.shipyard
+            
+            if not shipyard or shipyard.player_id != me.id: 
+                continue
+
+            dst_x = gym_action[point.x][point.y][2] # in (-1, 1)
+            dst_y = gym_action[point.x][point.y][3] # in (-1, 1)
+
+            dst_x = int((dst_x + 1) * 10.49) # interger in [0, 20]
+            dst_y = int((dst_y + 1) * 10.49) # interger in [0, 20]
+
+            dst = (dst_x, dst_y)
+            src = (shipyard.position.x, shipyard.position.y)
+            
+            number_of_ships = int(
+                clip_normalize(
+                    x=abs(gym_action[point.x][point.y][1]),
+                    low_in=-1,
+                    high_in=1,
+                    low_out=1,
+                    high_out=MAX_ACTION_FLEET_SIZE
+                )
+            )
+
             action = None
-            # Shipyard defenser, note: now does the same as greedy spawner, should solve the shipyard problem first
-            if -1 <= gym_action[0] < -0.6:
-                # Limit the number of ships to the maximum that can be actually built
+            mission = gym_action[point.x][point.y][0]
+            if mission < -0.6: # do nothing
+                pass
+
+            elif mission >= -0.6 and mission < -0.2: # build ships
+                # Limit the number of ships to the amount that is actually present in the shipyard
                 max_spawn = shipyard.max_spawn
                 max_purchasable = floor(me.kore / self.config["spawnCost"])
                 number_of_ships = min(number_of_ships, max_spawn, max_purchasable)
+
                 if number_of_ships:
                     action = ShipyardAction.spawn_ships(number_ships=number_of_ships)
-                print("Defense ", number_of_ships)
+
+            elif mission >= -0.2 and mission < 0.2: # shipyard builder
+                ship_cnt = shipyard.ship_count
+                number_of_ships = min(number_of_ships, ship_cnt)
                 
-            # Attacker
-            if -0.6 <= gym_action[0] < -0.2:
-                # Limit the number of ships to the amount that is actually present in the shipyard
-                shipyard_count = shipyard.ship_count
-                number_of_ships = min(number_of_ships, floor(shipyard_count * 2 / 3)) # *2/3 for not sending every fleet out
+                if number_of_ships >= 50: # the cost of building shipyard
+                    max_len = Fleet.max_flight_plan_len_for_ship_count(number_of_ships)
+                    flight_plan = FlightPlanHelper().get_shortest_fp(src=src, dst=dst, max_len=max_len, create_shipyard=True)
+
+                    if flight_plan:
+                        action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, flight_plan=flight_plan)
+
+            elif mission >= 0.2 and mission < 0.6: # miner
+                ship_cnt = shipyard.ship_count
+                number_of_ships = min(number_of_ships, ship_cnt)
+
+                flight_plan = FlightPlanHelper().get_shortest_fp(src=src, dst=dst, max_len=1e10) + FlightPlanHelper().get_shortest_fp(src=dst, dst=src, max_len=1e10)
+                min_ship = FlightPlanHelper().min_ship_cnt_for_fp(len(flight_plan))
+
+                if flight_plan and number_of_ships >= min_ship:
+                    action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, flight_plan=flight_plan)
+
+            else: # attacker
+                ship_cnt = shipyard.ship_count
+                number_of_ships = min(number_of_ships, ship_cnt)
                 
-                # Decide where to attack
                 if number_of_ships:
-                    target_pos = Point(gym_action[2], gym_action[3])
-                    flight_plan = getAttackFlightPlan(shipyard.position, target_pos, number_of_ships, self.board)
-                    # if flight plan too long, go attack weakest shipyard
-                    if(len(flight_plan) > max_flight_plan_len(number_of_ships)):
-                        target_pos = getWeakestShipyard(shipyard.position, self.board)
-                        flight_plan = getAttackFlightPlan(shipyard.position, target_pos, number_of_ships, self.board)
-                    # if flight plan empty or still too long, random choose a direction
-                    if not flight_plan or len(flight_plan) > max_flight_plan_len(number_of_ships):
-                        action = ShipyardAction.launch_fleet_in_direction(number_ships=number_of_ships,
-                                                                          direction=Direction.random_direction())
-                    # launch flight plan if nonempty
-                    else:
-                        action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, 
-                                                                              flight_plan=flight_plan)
-                    print("Attack ", target_pos[0], target_pos[1], " with ", number_of_ships)
-                    print(flight_plan)
-            # Builder
-            elif -0.2 <= gym_action[0] < 0.2:
-                # Limit the number of ships to the amount that is actually present in the shipyard
-                shipyard_count = shipyard.ship_count
-                number_of_ships = min(number_of_ships, floor(shipyard_count * 2 / 3)) # *2/3 for not sending every fleet out
-                
-                # Get flight plan
-                if number_of_ships >= 50:
-                    target_pos = Point(gym_action[2], gym_action[3])
-                    flight_plan = getBuildFlightPlan(shipyard.position, target_pos, number_of_ships, self.board)
-                    # if flight plan too long, do greedy (since normal mine is bound to have longer flight plan)
-                    if(len(flight_plan) > max_flight_plan_len(number_of_ships)):
-                        target_pos = getNearbyLargestKore(shipyard.position, self.board)
-                        flight_plan = getFlightPlan(shipyard.position, target_pos, number_of_ships, self.board)
-                    # if flight plan empty or still too long, random choose a direction
-                    if not flight_plan or len(flight_plan) > max_flight_plan_len(number_of_ships):
-                        action = ShipyardAction.launch_fleet_in_direction(number_ships=number_of_ships,
-                                                                          direction=Direction.random_direction())
-                    # launch flight plan if nonempty
-                    else:
-                        action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, 
-                                                                              flight_plan=flight_plan)
-                    print("Build ", target_pos[0], target_pos[1], " with ", number_of_ships)
-                    print(flight_plan)
-            # Greedy Spawner
-            elif 0.2 <= gym_action[0] < 0.6:
-                # Limit the number of ships to the maximum that can be actually built
-                max_spawn = shipyard.max_spawn
-                max_purchasable = floor(me.kore / self.config["spawnCost"])
-                number_of_ships = min(number_of_ships, max_spawn, max_purchasable)
-                if number_of_ships:
-                    action = ShipyardAction.spawn_ships(number_ships=number_of_ships)
-                print("Spawn ", number_of_ships)
-            # Miner
-            elif 0.6 <= gym_action[0] <= 1:
-                # Get number of ships to launch
-                shipyard_count = shipyard.ship_count
-                number_of_ships = min(number_of_ships, floor(shipyard_count * 2 / 3)) # *2/3 for not sending every fleet out
-                if number_of_ships:
-                    target_pos = Point(gym_action[2], gym_action[3])
-                    flight_plan = getFlightPlan(shipyard.position, target_pos, number_of_ships, self.board)
-                    #print(gym_action[2], gym_action[3])
-                    # if flight plan too long, go get max kore
-                    if(len(flight_plan) > max_flight_plan_len(number_of_ships)):
-                        target_pos = getNearestLargestKore(shipyard.position, self.board)
-                        flight_plan = getFlightPlan(shipyard.position, target_pos, number_of_ships, self.board)
-                        #print("######### do go fetch max kore, flight plan: ", flight_plan) 
-                    # flight plan still too long, do greedy mine
-                    if(len(flight_plan) > max_flight_plan_len(number_of_ships)):
-                        target_pos = getNearbyLargestKore(shipyard.position, self.board)
-                        flight_plan = getFlightPlan(shipyard.position, target_pos, number_of_ships, self.board)
-                        #print("######### do greedy, flight plan: ", flight_plan) 
-                    # if flight plan empty or still too long, random choose a direction
-                    if not flight_plan or len(flight_plan) > max_flight_plan_len(number_of_ships):
-                        #print("######### random flight plan: ", flight_plan)
-                        action = ShipyardAction.launch_fleet_in_direction(number_ships=number_of_ships,
-                                                                          direction=Direction.random_direction())
-                    # launch flight plan if nonempty
-                    else:
-                        #print("######### launch miner flight plan: ", flight_plan)
-                        action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, 
-                                                                              flight_plan=flight_plan)
-                    print("Mine ", target_pos[0], target_pos[1], " with ", number_of_ships)
-                    print(flight_plan)
+                    max_len = Fleet.max_flight_plan_len_for_ship_count(number_of_ships)
+                    flight_plan = FlightPlanHelper().get_shortest_fp(src=src, dst=dst, max_len=max_len)
+                    
+                    if flight_plan:
+                        action = ShipyardAction.launch_fleet_with_flight_plan(number_ships=number_of_ships, flight_plan=flight_plan)
+
             shipyard.next_action = action
 
         return me.next_actions
 
     @property
     def obs_as_gym_state(self) -> np.ndarray:
-        """Return the current observation encoded as a state in state space.
-
-        In other words, transform a kore observation into a stable-baselines3-compatible np.ndarray.
-
-        This property is central - It defines how the kore board is mapped to our state space.
-        You can modify it to include as many features as you see convenient.
-
-        Let's keep start with something easy: Define a 21x21x(4+3) state (size x size x n_features and 3 extra features).
-        # Feature 0: How much kore there is in a cell
-        # Feature 1: How many ships there are in a cell (>0: friendly, <0: enemy)
-        # Feature 2: Fleet direction
-        # Feature 3: Is a shipyard present? (1: friendly, -1: enemy, 0: no)
-        # Feature 4: Progress - What turn is it?
-        # Feature 5: How much kore do I have?
-        # Feature 6: How much kore does the opponent have?
-
-        We'll make sure that all features are in the range [-1, 1] and as close to a normal distribution as possible.
-
-        Note: This mapping doesn't tackle a critical issue in kore: How to encode (full) flight plans?
         """
-        # Init output state
-        gym_state = np.ndarray(shape=(self.config.size, self.config.size, N_FEATURES))
+        Return the current observation encoded as a state in state space.
 
-        # Get our player ID
+        #################### 2D features ####################
+        ######### 21x21x4 (size x size x n_features) ########
+        Cell:
+            feat 0. #kore in the cell
+
+        Shipyard:
+            feat 1. #ships (*= -1 if the yard belongs to enemy)
+            feat 2. max spawn
+
+        Fleet:
+            feat 3. #ships of mine
+            feat 4. #ships of the opponent
+
+        #################### 1D features ####################
+        ################### N_1D_FEATURES ###################
+        General:
+            feat 6: #plays so far
+            feat 7: #kore I have
+            feat 8: #kore the opponent has
+
+        """
+
+        state_2D = np.zeros(shape=(self.config.size, self.config.size, N_2D_FEATURES))
         board = self.board
-        our_id = board.current_player_id
+        my_id = board.current_player_id
 
-        for point, cell in board.cells.items():                 # board.cells =  Dict[Point, Cell]
-            # Feature 0: How much kore
-            gym_state[point.y, point.x, 0] = cell.kore
+        for point, cell in board.cells.items():
+            # feat 0: #kore in the cell
+            state_2D[point.y, point.x, 0] = cell.kore
 
-            # Feature 1: How many ships (>0: friendly, <0: enemy)
-            # Feature 2: Fleet direction
-            fleet = cell.fleet
-            if fleet:
-                modifier = 1 if fleet.player_id == our_id else -1
-                gym_state[point.y, point.x, 1] = modifier * fleet.ship_count
-                gym_state[point.y, point.x, 2] = fleet.direction.value
-            else:
-                # The current cell has no fleet
-                gym_state[point.y, point.x, 1] = gym_state[point.y, point.x, 2] = 0
-
-            # Feature 3: Shipyard present (1: friendly, -1: enemy)
             shipyard = cell.shipyard
             if shipyard:
-                gym_state[point.y, point.x, 3] = 1 if shipyard.player_id == our_id else -1
-            else:
-                # The current cell has no shipyard
-                gym_state[point.y, point.x, 3] = 0
+                # feature 1: #ships owned (shipyard)
+                state_2D[point.y, point.x, 1] = (
+                    shipyard.ship_count 
+                    if shipyard.player_id == my_id 
+                    else -shipyard.ship_count
+                )
+                
+                # feature 2: max spawn (shipyard)
+                state_2D[point.y, point.x, 2] = shipyard.max_spawn
 
-        # Normalize features to interval [-1, 1]
-        # Feature 0: Logarithmic scale, kore in range [0, MAX_OBSERVABLE_KORE]
-        gym_state[:, :, 0] = clip_normalize(
-            x=np.log2(gym_state[:, :, 0] + 1),
+            fleet = cell.fleet
+            if fleet:
+                # feat 3. #ships of mine
+                if fleet.player_id == my_id:
+                    state_2D[point.y, point.x, 3] = fleet.ship_count
+                # feat 4. #ships of the opponent
+                else: 
+                    state_2D[point.y, point.x, 4] = fleet.ship_count
+
+        # express flight plan as future boards
+        next_board = self.board.next()
+        for i in range(10):
+            for point, cell in next_board.cells.items():
+                fleet = cell.fleet
+                if fleet:
+                    # feat 3. #ships of mine
+                    if fleet.player_id == my_id:
+                        state_2D[point.y, point.x, 3] += fleet.ship_count * 0.9**(i+1)
+                    # feat 4. #ships of the opponent
+                    else: 
+                        state_2D[point.y, point.x, 4] += fleet.ship_count * 0.9**(i+1)
+                
+            next_board = next_board.next()
+
+        # For better performance, bound all features in the range [-1, 1]
+        # and as close to a normal distribution as possible
+
+        # feat 0: Logarithmic scale, kore in range [0, MAX_OBSERVABLE_KORE]
+        state_2D[:, :, 0] = clip_normalize(
+            x=np.log2(state_2D[:, :, 0] + 1),
             low_in=0,
             high_in=np.log2(MAX_OBSERVABLE_KORE)
         )
 
-        # Feature 1: Ships in range [-MAX_OBSERVABLE_SHIPS, MAX_OBSERVABLE_SHIPS]
-        gym_state[:, :, 1] = clip_normalize(
-            x=gym_state[:, :, 1],
+        # feat 1: Ships in range [-MAX_OBSERVABLE_SHIPS, MAX_OBSERVABLE_SHIPS]
+        state_2D[:, :, 1] = clip_normalize(
+            x=state_2D[:, :, 1],
             low_in=-MAX_OBSERVABLE_SHIPS,
-            high_in=MAX_OBSERVABLE_SHIPS
+            high_in=MAX_OBSERVABLE_SHIPS,
         )
 
-        # Feature 2: Fleet direction in range (1, 4)
-        gym_state[:, :, 2] = clip_normalize(
-            x=gym_state[:, :, 2],
-            low_in=1,
-            high_in=4
+        # feat 2: spawn maximum in range [1, 10]
+        state_2D[:, :, 2] = clip_normalize(
+            x=state_2D[:, :, 2],
+            low_in=MIN_SPAWN_LIMIT,
+            high_in=MAX_SPAWN_LIMIT,
         )
 
-        # Feature 3 is already as normal as it gets
+        # feat 3: #ships of mine [0, MAX_OBSERVABLE_SHIPS]
+        state_2D[:, :, 3] = clip_normalize(
+            x=state_2D[:, :, 3],
+            low_in=0,
+            high_in=MAX_OBSERVABLE_SHIPS*2,
+        )
+
+        # feat 4: #ships of the opponent [0, MAX_OBSERVABLE_SHIPS]
+        state_2D[:, :, 4] = clip_normalize(
+            x=state_2D[:, :, 4],
+            low_in=0,
+            high_in=MAX_OBSERVABLE_SHIPS*2,
+        )
 
         # Flatten the input (recommended by stable_baselines3.common.env_checker.check_env)
-        output_state = gym_state.flatten()
+        output_state = state_2D.flatten()
 
-        # Extra Features: Progress, how much kore do I have, how much kore does opponent have
+        # 1D Features
         player = board.current_player
         opponent = board.opponents[0]
         progress = clip_normalize(board.step, low_in=0, high_in=GAME_CONFIG['episodeSteps'])
@@ -411,8 +464,8 @@ class KoreGymEnv(gym.Env):
     def compute_reward(self, done: bool, strict=False) -> float:
         """Compute the agent reward. Welcome to the fine art of RL.
 
-        We'll compute the reward as the current board value and a final bonus if the episode is over. If the player
-        wins the episode, we'll add a final bonus that increases with shorter time-to-victory.
+         We'll compute the reward as the current board value and a final bonus if the episode is over. If the player
+          wins the episode, we'll add a final bonus that increases with shorter time-to-victory.
         If the player loses, we'll subtract that bonus.
 
         Args:
